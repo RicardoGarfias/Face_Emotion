@@ -21,7 +21,7 @@ Basado en el repositorio de [David Revelo Luna](https://github.com/DavidReveloLu
 </p>
 
 > Ejemplos tomados del conjunto de validación de FER-2013 y procesados con `modelFEC_v3.h5`.
-> Se eligieron caras que el modelo clasifica bien para mostrar cada emoción; en general acierta ~68 % de las veces.
+> Se eligieron caras que el modelo clasifica bien para mostrar cada emoción; en general el modelo v3 acierta ~68 % de las veces (el ensamble actual, ~70 %).
 
 | Clase | Emoción |
 |---|---|
@@ -45,13 +45,26 @@ Basado en el repositorio de [David Revelo Luna](https://github.com/DavidReveloLu
 | Archivo | Descripción | Precisión en validación |
 |---|---|---|
 | `modelFEC.h5` | CNN original del autor, entrenada desde cero ([notebook original](https://github.com/DavidReveloLuna/Face_Emotion/blob/master/FaceEmotion.ipynb)) | 64.86 % |
-| `modelFEC_v3.h5` | EfficientNetB0 preentrenada en ImageNet + fine-tuning ([train_transfer.py](train_transfer.py)) | **67.95 %** (con TTA) |
+| `modelFEC_v3.h5` | EfficientNetB0 (ImageNet) + fine-tuning, 96 px ([train_transfer.py](train_transfer.py)) | 67.95 % |
+| `modelFEC_v4_b2_128_s1.h5` | EfficientNetB2 (ImageNet) + fine-tuning, 128 px | 69.59 % |
+| **Ensamble v3 + v4** | Promedio de las predicciones de los dos modelos | **70.46 %** |
 
-La app usa `modelFEC_v3.h5` si existe y, si no, el original. Si además hay modelos `modelFEC_v4*.h5`
-(EfficientNetB2 a 128 px, ver [Entrenamiento](#entrenamiento)), los usa todos junto con el v3 como **ensamble**:
-promedia sus predicciones.
+*Todas las precisiones de v3, v4 y el ensamble incluyen TTA (promedio con la imagen volteada).*
 
-Precisión por emoción (F1) con `modelFEC_v3.h5`: felicidad 0.87, sorpresa 0.79, asco 0.70, neutral 0.63, enojo 0.60, tristeza 0.55, miedo 0.51.
+La app usa el **ensamble**: todos los `modelFEC_v4*.h5` junto con `modelFEC_v3.h5` (~15-20 FPS en CPU).
+Si no hay modelos v4, usa solo el v3 (~30 FPS); si tampoco está, el original.
+
+Precisión por emoción (F1) del ensamble:
+
+| Emoción | Original | Ensamble |
+|---|---|---|
+| Felicidad | 0.84 | 0.89 |
+| Sorpresa | 0.79 | 0.81 |
+| Asco | 0.66 | 0.74 |
+| Neutral | 0.58 | 0.67 |
+| Enojo | 0.56 | 0.62 |
+| Tristeza | 0.52 | 0.59 |
+| Miedo | 0.49 | 0.54 |
 
 ## Instalación (Windows, Python 3.12)
 
@@ -67,7 +80,7 @@ Precisión por emoción (F1) con `modelFEC_v3.h5`: felicidad 0.87, sorpresa 0.79
     > python FaceEmotionApp.py
 
 - **Cargar imagen:** detecta todos los rostros de una foto y muestra el top 3 de emociones de cada uno.
-- **Cámara en tiempo real:** detección con la webcam (~30 FPS en CPU). El mismo botón la detiene.
+- **Cámara en tiempo real:** detección con la webcam (~15-20 FPS en CPU con el ensamble). El mismo botón la detiene.
 
 ## Entrenamiento
 
