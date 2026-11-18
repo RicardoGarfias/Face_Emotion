@@ -4,9 +4,18 @@ Detección de emociones faciales en imágenes y en tiempo real con la webcam, us
 
 Basado en el repositorio de [David Revelo Luna](https://github.com/DavidReveloLuna/Face_Emotion).
 
-<img src="assets/ToGift.gif" width="500">
+<p align="center">
+  <img src="assets/app_captura.png" width="520" alt="Interfaz gráfica del detector de emociones">
+</p>
 
 ## Emociones detectadas
+
+<p align="center">
+  <img src="assets/ejemplo_emociones.jpg" width="800" alt="Ejemplo de detección de las 7 emociones">
+</p>
+
+> Ejemplos tomados del conjunto de validación de FER-2013 y procesados con `modelFEC_v3.h5`.
+> Se eligieron caras que el modelo clasifica bien para mostrar cada emoción; en general acierta ~68 % de las veces.
 
 | Clase | Emoción |
 |---|---|

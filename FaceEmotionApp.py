@@ -77,6 +77,12 @@ def predict_emotion(frame, face_net, emotion_model, threshold=0.4):
             faces.append(face[..., np.newaxis])
             locs.append((xi, yi, xf, yf))
 
+    # Ordena los rostros en orden de lectura (por filas, de izquierda a derecha)
+    # para que "Rostro 1, 2, 3..." coincida con lo que se ve en la imagen
+    order = reading_order(locs)
+    faces = [faces[i] for i in order]
+    locs = [locs[i] for i in order]
+
     preds = []
     if faces:
         # Test-time augmentation: se predice el rostro original y el volteado
@@ -88,18 +94,41 @@ def predict_emotion(frame, face_net, emotion_model, threshold=0.4):
     return locs, preds
 
 
+def reading_order(locs):
+    """Índices de las cajas ordenadas por filas (arriba -> abajo) y luego de izquierda a derecha."""
+    if not locs:
+        return []
+    by_y = sorted(range(len(locs)), key=lambda i: (locs[i][1] + locs[i][3]) / 2)
+    rows, current = [], [by_y[0]]
+    for i in by_y[1:]:
+        ref = locs[current[0]]
+        cy = (locs[i][1] + locs[i][3]) / 2
+        if abs(cy - (ref[1] + ref[3]) / 2) < (ref[3] - ref[1]) / 2:  # misma fila
+            current.append(i)
+        else:
+            rows.append(current)
+            current = [i]
+    rows.append(current)
+    return [i for row in rows for i in sorted(row, key=lambda i: locs[i][0])]
+
+
 def draw_results(frame, locs, preds):
-    scale = max(frame.shape[1] / 640, 0.6)
+    h, w = frame.shape[:2]
     for (xi, yi, xf, yf), pred in zip(locs, preds):
         idx = int(np.argmax(pred))
         label = "{}: {:.0f}%".format(CLASSES[idx], pred[idx] * 100)
-        thick = max(2, int(2 * scale))
+        # El tamaño del texto depende del tamaño del rostro, no de la imagen completa
+        scale = float(np.clip((xf - xi) / 160, 0.5, 1.6))
+        thick = 2 if scale >= 0.75 else 1
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.8 * scale, thick)
-        top = max(yi - th - 16, 0)
-        cv2.rectangle(frame, (xi, top), (xi + tw + 10, top + th + 16), (255, 0, 0), -1)
-        cv2.putText(frame, label, (xi + 5, top + th + 8), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.8 * scale, (0, 255, 0), thick)
-        cv2.rectangle(frame, (xi, yi), (xf, yf), (255, 0, 0), max(3, int(3 * scale)))
+        pad = int(6 * scale) + 2
+        # La etiqueta va arriba del recuadro, sin salirse de la imagen
+        lx = int(np.clip(xi, 0, max(w - tw - 2 * pad, 0)))
+        top = max(yi - th - 2 * pad, 0)
+        cv2.rectangle(frame, (lx, top), (lx + tw + 2 * pad, top + th + 2 * pad), (255, 0, 0), -1)
+        cv2.putText(frame, label, (lx + pad, top + th + pad), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8 * scale, (0, 255, 0), thick, cv2.LINE_AA)
+        cv2.rectangle(frame, (xi, yi), (xf, yf), (255, 0, 0), max(2, int(round(3 * scale))))
     return frame
 
 
