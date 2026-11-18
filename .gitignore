@@ -1,0 +1,22 @@
+# Entornos virtuales
+venv/
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+
+# Checkpoints de Jupyter
+.ipynb_checkpoints/
+
+# Dataset descomprimido (se genera a partir de images.rar)
+images/
+
+# Registros de entrenamiento
+train_transfer_log.csv
+train_transfer_output.txt
+_bench.h5
+
+# Capturas de prueba personales
+angry.png
+image.png

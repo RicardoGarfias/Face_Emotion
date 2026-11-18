@@ -14,7 +14,10 @@ from tkinter import filedialog, messagebox
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
+import tensorflow as tf
 from tensorflow.keras.models import load_model
+
+from emotion_smoothing import EmotionSmoother
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -29,11 +32,25 @@ CLASSES_ES = {
 VIEW_W, VIEW_H = 800, 600
 
 
+def emotion_model_path():
+    """Usa el modelo v3 (transfer learning) si existe; si no, el original."""
+    v3 = os.path.join(BASE_DIR, "modelFEC_v3.h5")
+    return v3 if os.path.exists(v3) else os.path.join(BASE_DIR, "modelFEC.h5")
+
+
+def fast_predictor(model):
+    """Compila el modelo con tf.function: ~6x más rápido que llamarlo directo en cada frame."""
+    fn = tf.function(lambda x: model(x, training=False), reduce_retracing=True)
+    for n in (2, 4):  # calentamiento para que el primer frame no se trabe
+        fn(tf.zeros((n, 48, 48, 1)))
+    return lambda x, training=False: fn(tf.convert_to_tensor(x, tf.float32))
+
+
 def load_models():
     prototxt = os.path.join(BASE_DIR, "face_detector", "deploy.prototxt")
     weights = os.path.join(BASE_DIR, "face_detector", "res10_300x300_ssd_iter_140000.caffemodel")
     face_net = cv2.dnn.readNet(prototxt, weights)
-    emotion_model = load_model(os.path.join(BASE_DIR, "modelFEC.h5"))
+    emotion_model = fast_predictor(load_model(emotion_model_path(), compile=False))
     return face_net, emotion_model
 
 
@@ -62,8 +79,12 @@ def predict_emotion(frame, face_net, emotion_model, threshold=0.4):
 
     preds = []
     if faces:
-        # Una sola llamada al modelo para todos los rostros (más rápido)
-        preds = emotion_model(np.array(faces), training=False).numpy()
+        # Test-time augmentation: se predice el rostro original y el volteado
+        # horizontalmente en una sola llamada al modelo, y se promedian
+        batch = np.array(faces)
+        both = np.concatenate([batch, batch[:, :, ::-1, :]])
+        out = emotion_model(both, training=False).numpy()
+        preds = (out[:len(faces)] + out[len(faces):]) / 2
     return locs, preds
 
 
@@ -93,6 +114,7 @@ class EmotionApp:
         self.running = False
         self.prev_time = 0
         self.photo = None
+        self.smoother = EmotionSmoother()
 
         # --- Barra de botones ---
         bar = tk.Frame(root, bg="#1e1e2e")
@@ -131,7 +153,8 @@ class EmotionApp:
 
         try:
             self.face_net, self.emotion_model = load_models()
-            self.status.config(text="Modelos listos", fg="#a6e3a1")
+            name = os.path.basename(emotion_model_path())
+            self.status.config(text=f"Modelos listos ({name})", fg="#a6e3a1")
             self.set_buttons(tk.NORMAL)
         except Exception as e:
             self.status.config(text="Error cargando modelos", fg="#f38ba8")
@@ -196,6 +219,7 @@ class EmotionApp:
             self.cam = None
             return
         self.running = True
+        self.smoother.reset()
         self.prev_time = time.time()
         self.btn_cam.config(text="⏹  Detener cámara", bg="#ef4444", activebackground="#dc2626")
         self.status.config(text="Cámara activa", fg="#a6e3a1")
@@ -217,6 +241,8 @@ class EmotionApp:
             h, w = frame.shape[:2]
             frame = cv2.resize(frame, (640, int(h * 640 / w)))
             locs, preds = predict_emotion(frame, self.face_net, self.emotion_model)
+            # Promedia con los frames anteriores para que la etiqueta no parpadee
+            preds = self.smoother.update(locs, preds)
             draw_results(frame, locs, preds)
 
             now = time.time()
