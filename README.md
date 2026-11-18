@@ -8,6 +8,12 @@ Basado en el repositorio de [David Revelo Luna](https://github.com/DavidReveloLu
   <img src="assets/app_captura.png" width="520" alt="Interfaz gráfica del detector de emociones">
 </p>
 
+**Demo original del autor** (detección en tiempo real con la webcam):
+
+<p align="center">
+  <img src="assets/ToGift.gif" width="500" alt="Demo original de David Revelo Luna">
+</p>
+
 ## Emociones detectadas
 
 <p align="center">
