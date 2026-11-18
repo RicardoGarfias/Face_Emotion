@@ -32,15 +32,22 @@ CLASSES_ES = {
 VIEW_W, VIEW_H = 800, 600
 
 
-def emotion_model_path():
-    """Usa el modelo v3 (transfer learning) si existe; si no, el original."""
-    v3 = os.path.join(BASE_DIR, "modelFEC_v3.h5")
-    return v3 if os.path.exists(v3) else os.path.join(BASE_DIR, "modelFEC.h5")
+def emotion_model_paths():
+    """Modelos de emociones a usar.
+
+    Si hay modelos v4 (modelFEC_v4*.h5), se usan todos junto con el v3 como ensamble
+    (se promedian sus predicciones). Si no, el v3. Si tampoco existe, el original.
+    """
+    names = sorted(f for f in os.listdir(BASE_DIR) if f.startswith("modelFEC_v4") and f.endswith(".h5"))
+    if os.path.exists(os.path.join(BASE_DIR, "modelFEC_v3.h5")):
+        names.append("modelFEC_v3.h5")
+    return [os.path.join(BASE_DIR, n) for n in (names or ["modelFEC.h5"])]
 
 
-def fast_predictor(model):
-    """Compila el modelo con tf.function: ~6x más rápido que llamarlo directo en cada frame."""
-    fn = tf.function(lambda x: model(x, training=False), reduce_retracing=True)
+def fast_predictor(models):
+    """Compila el modelo (o el ensamble) con tf.function: ~6x más rápido que llamarlo directo en cada frame."""
+    fn = tf.function(lambda x: tf.add_n([m(x, training=False) for m in models]) / len(models),
+                     reduce_retracing=True)
     for n in (2, 4):  # calentamiento para que el primer frame no se trabe
         fn(tf.zeros((n, 48, 48, 1)))
     return lambda x, training=False: fn(tf.convert_to_tensor(x, tf.float32))
@@ -50,7 +57,7 @@ def load_models():
     prototxt = os.path.join(BASE_DIR, "face_detector", "deploy.prototxt")
     weights = os.path.join(BASE_DIR, "face_detector", "res10_300x300_ssd_iter_140000.caffemodel")
     face_net = cv2.dnn.readNet(prototxt, weights)
-    emotion_model = fast_predictor(load_model(emotion_model_path(), compile=False))
+    emotion_model = fast_predictor([load_model(p, compile=False) for p in emotion_model_paths()])
     return face_net, emotion_model
 
 
@@ -182,8 +189,9 @@ class EmotionApp:
 
         try:
             self.face_net, self.emotion_model = load_models()
-            name = os.path.basename(emotion_model_path())
-            self.status.config(text=f"Modelos listos ({name})", fg="#a6e3a1")
+            names = [os.path.basename(p) for p in emotion_model_paths()]
+            label = names[0] if len(names) == 1 else f"ensamble: {' + '.join(names)}"
+            self.status.config(text=f"Modelos listos ({label})", fg="#a6e3a1")
             self.set_buttons(tk.NORMAL)
         except Exception as e:
             self.status.config(text="Error cargando modelos", fg="#f38ba8")

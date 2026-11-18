@@ -47,7 +47,9 @@ Basado en el repositorio de [David Revelo Luna](https://github.com/DavidReveloLu
 | `modelFEC.h5` | CNN original del autor, entrenada desde cero ([notebook original](https://github.com/DavidReveloLuna/Face_Emotion/blob/master/FaceEmotion.ipynb)) | 64.86 % |
 | `modelFEC_v3.h5` | EfficientNetB0 preentrenada en ImageNet + fine-tuning ([train_transfer.py](train_transfer.py)) | **67.95 %** (con TTA) |
 
-La app usa `modelFEC_v3.h5` si existe y, si no, el original.
+La app usa `modelFEC_v3.h5` si existe y, si no, el original. Si además hay modelos `modelFEC_v4*.h5`
+(EfficientNetB2 a 128 px, ver [Entrenamiento](#entrenamiento)), los usa todos junto con el v3 como **ensamble**:
+promedia sus predicciones.
 
 Precisión por emoción (F1) con `modelFEC_v3.h5`: felicidad 0.87, sorpresa 0.79, asco 0.70, neutral 0.63, enojo 0.60, tristeza 0.55, miedo 0.51.
 
@@ -71,13 +73,19 @@ Precisión por emoción (F1) con `modelFEC_v3.h5`: felicidad 0.87, sorpresa 0.79
 
 El dataset (FER-2013, 28,821 imágenes de entrenamiento y 7,066 de validación) está en `images.rar`.
 
-**En Google Colab con GPU (~30-40 min, recomendado):** sube [FaceEmotion_v3_Colab.ipynb](FaceEmotion_v3_Colab.ipynb) a Colab,
-activa la GPU T4 y ejecuta todo. Al final se descarga `modelFEC_v3.h5`.
+**En Google Colab con GPU (recomendado):** sube [FaceEmotion_Colab.ipynb](FaceEmotion_Colab.ipynb) a Colab,
+activa la GPU T4 y ejecuta todo. Por defecto entrena un modelo v4 (EfficientNetB2, 128 px, ~1 h), evalúa el
+ensamble con el v3 y descarga el `.h5`. En el paso 3 del notebook se elige la red, el tamaño y cuántos modelos entrenar.
 
-**En la PC con CPU (~2-3 h):** primero descomprime `images.rar` en la carpeta del proyecto (se crea `images/`), y luego:
+**En la PC:** primero descomprime `images.rar` en la carpeta del proyecto (se crea `images/`), y luego:
 
-    > python train_transfer.py              # entrena y guarda modelFEC_v3.h5
-    > python train_transfer.py --eval       # compara con el modelo original
+    > python train_transfer.py                          # v3: EfficientNetB0, 96 px (~2-3 h en CPU)
+    > python train_transfer.py --base b2 --img-size 128 --model modelFEC_v4_s1.h5
+    > python train_transfer.py --eval                   # compara el v3 con el modelo original
+    > python train_transfer.py --eval --model modelFEC_v3.h5 modelFEC_v4_s1.h5   # cada uno y el ensamble
+
+Opciones útiles: `--seed` (semilla), `--mixed-precision` (solo con GPU NVIDIA) y `--compact` (quita el estado
+del optimizador de un `.h5` para que pese menos).
 
 ## Estructura del repositorio
 
@@ -85,8 +93,8 @@ activa la GPU T4 y ejecuta todo. Al final se descarga `modelFEC_v3.h5`.
 |---|---|
 | `FaceEmotionApp.py` | Aplicación con interfaz gráfica (Tkinter) |
 | `emotion_smoothing.py` | Suavizado temporal de las predicciones en video |
-| `train_transfer.py` | Entrenamiento del modelo v3 |
-| `FaceEmotion_v3_Colab.ipynb` | El mismo entrenamiento en Google Colab con GPU |
+| `train_transfer.py` | Entrenamiento y evaluación de los modelos (v3, v4 y ensambles) |
+| `FaceEmotion_Colab.ipynb` | El mismo entrenamiento en Google Colab con GPU |
 | `modelFEC_v3.h5`, `modelFEC.h5` | Modelos de emociones (mejorado y original) |
 | `face_detector/` | Detector de rostros (SSD, OpenCV DNN) |
 | `images.rar` | Dataset FER-2013 |

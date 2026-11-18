@@ -1,18 +1,22 @@
-"""Entrenamiento con transfer learning (EfficientNetB0 preentrenada en ImageNet).
+"""Entrenamiento con transfer learning (EfficientNet preentrenada en ImageNet).
 
 El modelo resultante es compatible con la app: entrada (48, 48, 1) con valores
 0-255 y las mismas 7 clases. Internamente redimensiona la cara a IMG_SIZE x IMG_SIZE
 y la convierte a 3 canales para la red preentrenada.
 
 Uso:
-    venv\\Scripts\\python.exe train_transfer.py              # entrena
-    venv\\Scripts\\python.exe train_transfer.py --benchmark  # mide la velocidad y sale
-    venv\\Scripts\\python.exe train_transfer.py --eval       # solo evalúa modelFEC_v3.h5
+    python train_transfer.py                                   # v3: EfficientNetB0, 96 px
+    python train_transfer.py --base b2 --img-size 128 --mixed-precision --model modelFEC_v4_s1.h5
+    python train_transfer.py --eval                            # evalúa modelFEC_v3.h5
+    python train_transfer.py --eval --model modelFEC_v3.h5 modelFEC_v4_s1.h5   # cada uno y el ensamble
+    python train_transfer.py --compact --model modelFEC_v3.h5  # quita el optimizador del .h5 (más ligero)
+    python train_transfer.py --benchmark                       # mide la velocidad de entrenamiento
 
 Fases:
   1. Base congelada: solo se entrena la cabeza de clasificación (pocas épocas).
-  2. Fine-tuning de toda la red con una tasa de aprendizaje baja.
-El mejor modelo (por precisión en validación) se guarda en modelFEC_v3.h5.
+  2. Fine-tuning de toda la red con una tasa de aprendizaje baja con decaimiento coseno.
+El mejor modelo (por precisión en validación) se guarda en --model, en float32 y sin el
+estado del optimizador para que sea ligero y cargue en CPU.
 """
 import os
 os.environ["TF_USE_LEGACY_KERAS"] = "1"
@@ -30,22 +34,29 @@ from tensorflow.keras import layers
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "images")
 CACHE = os.path.join(DATA_DIR, "cache_48.npz")
-OUT_MODEL = os.path.join(BASE_DIR, "modelFEC_v3.h5")
 LOG_CSV = os.path.join(BASE_DIR, "train_transfer_log.csv")
 
 CLASSES = ['angry', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surprise']
 NUM_CLASSES = len(CLASSES)
+BASES = {"b0": "EfficientNetB0", "b1": "EfficientNetB1", "b2": "EfficientNetB2", "b3": "EfficientNetB3"}
 
 parser = argparse.ArgumentParser()
+parser.add_argument("--base", choices=sorted(BASES), default="b0", help="red preentrenada")
 parser.add_argument("--img-size", type=int, default=96, help="tamaño de entrada de la red preentrenada")
 parser.add_argument("--batch", type=int, default=64)
 parser.add_argument("--head-epochs", type=int, default=3)
 parser.add_argument("--ft-epochs", type=int, default=25)
+parser.add_argument("--seed", type=int, default=42)
+parser.add_argument("--mixed-precision", action="store_true", help="float16 en GPU (~2x más rápido); el .h5 final queda en float32")
+parser.add_argument("--subset", type=int, default=0, help="usa solo N imágenes de entrenamiento (para pruebas rápidas)")
 parser.add_argument("--benchmark", action="store_true")
 parser.add_argument("--eval", action="store_true")
-parser.add_argument("--model", default=OUT_MODEL, help="archivo .h5 donde se guarda / que se evalúa")
+parser.add_argument("--compact", action="store_true", help="re-guarda los modelos de --model sin optimizador")
+parser.add_argument("--model", nargs="+", default=["modelFEC_v3.h5"],
+                    help="archivo .h5 donde se guarda; con --eval o --compact puede ser una lista")
 args = parser.parse_args()
-OUT_MODEL = os.path.abspath(args.model)
+MODEL_PATHS = [p if os.path.isabs(p) else os.path.join(BASE_DIR, p) for p in args.model]
+OUT_MODEL = MODEL_PATHS[0]
 
 
 # ---------------------------------------------------------------- datos
@@ -100,24 +111,75 @@ def make_ds(x, y, training):
 
 
 # ---------------------------------------------------------------- modelo
-def build_model():
+IMAGENET_STDDEV_RGB = [0.229, 0.224, 0.225]
+
+
+def make_base(weights):
+    """Crea la EfficientNet preentrenada.
+
+    Con mixed precision, la EfficientNet de tf_keras con weights="imagenet" falla: tras la
+    normalización multiplica por 1/sqrt(std) con una constante float32. Para evitarlo se
+    construye sin esa multiplicación (weights=None), se copian los pesos de ImageNet y la
+    multiplicación se integra en la varianza de la capa Normalization (var * std), que es
+    matemáticamente equivalente.
+    """
+    app = getattr(keras.applications, BASES[args.base])
+    shape = (args.img_size, args.img_size, 3)
+    if not (weights == "imagenet" and args.mixed_precision):
+        return app(include_top=False, weights=weights, input_shape=shape)
+
+    policy = keras.mixed_precision.global_policy()
+    keras.mixed_precision.set_global_policy("float32")
+    imagenet_weights = app(include_top=False, weights="imagenet", input_shape=shape).get_weights()
+    keras.mixed_precision.set_global_policy(policy)
+
+    base = app(include_top=False, weights=None, input_shape=shape)
+    base.set_weights(imagenet_weights)
+    norm = next(l for l in base.layers if isinstance(l, layers.Normalization))
+    mean, var, count = norm.get_weights()
+    norm.set_weights([mean, var * np.array(IMAGENET_STDDEV_RGB, dtype=var.dtype).reshape(var.shape), count])
+    return base
+
+
+def build_model(weights="imagenet"):
     inputs = layers.Input(shape=(48, 48, 1))           # igual que la app: gris 48x48, 0-255
-    x = layers.Resizing(args.img_size, args.img_size, interpolation="bilinear")(inputs)
-    x = layers.Concatenate()([x, x, x])                 # gris -> 3 canales
-    base = keras.applications.EfficientNetB0(include_top=False, weights="imagenet",
-                                             input_shape=(args.img_size, args.img_size, 3))
+    # Estas capas van en float32: con mixed precision, EfficientNet espera su entrada en float32
+    x = layers.Resizing(args.img_size, args.img_size, interpolation="bilinear", dtype="float32")(inputs)
+    x = layers.Concatenate(dtype="float32")([x, x, x])  # gris -> 3 canales
+    base = make_base(weights)
     base.trainable = False
     x = base(x, training=False)                         # BatchNorm en modo inferencia
     x = layers.GlobalAveragePooling2D()(x)
     x = layers.Dropout(0.4)(x)
-    outputs = layers.Dense(NUM_CLASSES, activation="softmax")(x)
-    return keras.Model(inputs, outputs, name="FaceEmotion_v3"), base
+    # La salida siempre en float32 (necesario con mixed precision)
+    outputs = layers.Dense(NUM_CLASSES, activation="softmax", dtype="float32")(x)
+    return keras.Model(inputs, outputs, name=f"FaceEmotion_{args.base}_{args.img_size}"), base
 
 
 def compile_model(model, lr):
     model.compile(optimizer=keras.optimizers.Adam(lr),
                   loss=keras.losses.CategoricalCrossentropy(label_smoothing=0.1),
                   metrics=["accuracy"])
+
+
+def save_light(model, path):
+    """Guarda solo la arquitectura y los pesos en float32 (sin optimizador)."""
+    if args.mixed_precision:
+        # Reconstruye el modelo en float32 y copia los pesos (las variables ya son float32)
+        keras.mixed_precision.set_global_policy("float32")
+        light, _ = build_model(weights=None)
+        light.set_weights(model.get_weights())
+        model = light
+    model.save(path, include_optimizer=False)
+
+
+def compact(paths):
+    from tensorflow.keras.models import load_model
+    for p in paths:
+        before = os.path.getsize(p)
+        m = load_model(p, compile=False)
+        m.save(p, include_optimizer=False)
+        print(f"{os.path.basename(p)}: {before / 1e6:.1f} MB -> {os.path.getsize(p) / 1e6:.1f} MB")
 
 
 # ---------------------------------------------------------------- evaluación
@@ -149,26 +211,41 @@ def report(y, p, title):
     return np.mean(pred == y)
 
 
-def evaluate(xv, yv):
+def evaluate(xv, yv, paths):
     from tensorflow.keras.models import load_model
-    orig = load_model(os.path.join(BASE_DIR, "modelFEC.h5"))
+    orig = load_model(os.path.join(BASE_DIR, "modelFEC.h5"), compile=False)
     report(yv, predict(orig, xv, tta=False), "Original (modelFEC.h5)")
-    report(yv, predict(orig, xv, tta=True), "Original + TTA")
-    best = load_model(OUT_MODEL)
-    report(yv, predict(best, xv, tta=False), "v3 transfer learning")
-    report(yv, predict(best, xv, tta=True), "v3 transfer learning + TTA")
+    probs = []
+    for p in paths:
+        m = load_model(p, compile=False)
+        probs.append(predict(m, xv, tta=True))
+        report(yv, probs[-1], f"{os.path.basename(p)} + TTA")
+    if len(probs) > 1:
+        names = " + ".join(os.path.basename(p) for p in paths)
+        report(yv, np.mean(probs, axis=0), f"Ensamble ({names}) + TTA")
 
 
 # ---------------------------------------------------------------- main
 def main():
-    tf.keras.utils.set_random_seed(42)
+    if args.compact:
+        compact(MODEL_PATHS)
+        return
+
+    tf.keras.utils.set_random_seed(args.seed)
     xt, yt, xv, yv = load_data()
+    if args.subset:
+        idx = np.random.default_rng(args.seed).permutation(len(xt))[:args.subset]
+        xt, yt = xt[idx], yt[idx]
     print(f"train {xt.shape}  val {xv.shape}")
 
     if args.eval:
-        evaluate(xv, yv)
+        evaluate(xv, yv, MODEL_PATHS)
         return
 
+    if args.mixed_precision:
+        keras.mixed_precision.set_global_policy("mixed_float16")
+    print(f"modelo: {BASES[args.base]} {args.img_size}px · semilla {args.seed} · "
+          f"mixed precision {'sí' if args.mixed_precision else 'no'}")
     model, base = build_model()
 
     if args.benchmark:
@@ -180,27 +257,25 @@ def main():
         model.fit(ds.skip(5), verbose=0)
         per_step = (time.time() - t) / 25
         steps = int(np.ceil(len(xt) / args.batch))
-        print(f"img_size={args.img_size}: {per_step:.3f} s/paso -> ~{per_step * steps / 60:.1f} min por época (fine-tuning)")
-        p = os.path.join(BASE_DIR, "_bench.h5")
-        model.save(p)
-        m2 = keras.models.load_model(p)
-        print("guardar/cargar .h5 OK:", np.allclose(model.predict(xv[:4].astype('float32'), verbose=0),
-                                                    m2.predict(xv[:4].astype('float32'), verbose=0), atol=1e-5))
-        os.remove(p)
+        print(f"{BASES[args.base]} {args.img_size}px: {per_step:.3f} s/paso -> "
+              f"~{per_step * steps / 60:.1f} min por época (fine-tuning)")
         return
 
     # Pesos por clase: raíz cuadrada de los pesos "balanced"
     counts = np.bincount(yt, minlength=NUM_CLASSES)
-    cw = np.sqrt(len(yt) / (NUM_CLASSES * counts))
+    cw = np.sqrt(len(yt) / (NUM_CLASSES * np.maximum(counts, 1)))
     class_weight = {i: float(w) for i, w in enumerate(cw)}
     print("pesos por clase:", {CLASSES[i]: round(w, 2) for i, w in class_weight.items()})
 
     train_ds = make_ds(xt, yt, True)
     val_ds = make_ds(xv, yv, False)
-    ckpt = keras.callbacks.ModelCheckpoint(OUT_MODEL, monitor="val_accuracy", save_best_only=True, verbose=1)
-    csv = keras.callbacks.CSVLogger(LOG_CSV, append=True)
+    # Durante el entrenamiento solo se guardan los pesos; al final se exporta el .h5 ligero
+    ckpt_path = OUT_MODEL + ".ckpt.weights.h5"
+    ckpt = keras.callbacks.ModelCheckpoint(ckpt_path, monitor="val_accuracy", save_best_only=True,
+                                           save_weights_only=True, verbose=1)
     if os.path.exists(LOG_CSV):
         os.remove(LOG_CSV)
+    csv = keras.callbacks.CSVLogger(LOG_CSV, append=True)
 
     # Fase 1: solo la cabeza
     print("\n### Fase 1: base congelada")
@@ -219,8 +294,11 @@ def main():
               initial_epoch=args.head_epochs, class_weight=class_weight,
               callbacks=[ckpt, csv, early], verbose=2)
 
-    evaluate(xv, yv)
-    print(f"\nModelo guardado en {OUT_MODEL}")
+    model.load_weights(ckpt_path)  # el mejor de todas las épocas (fase 1 o 2)
+    save_light(model, OUT_MODEL)
+    os.remove(ckpt_path)
+    print(f"\nModelo guardado en {OUT_MODEL} ({os.path.getsize(OUT_MODEL) / 1e6:.1f} MB)")
+    evaluate(xv, yv, [OUT_MODEL])
 
 
 if __name__ == "__main__":
