@@ -3,6 +3,4 @@ tf_keras==2.21.0
 opencv-python==4.14.0.94
 numpy==2.5.4
 pillow==13.0.0
-imutils==0.5.4
-matplotlib==3.11.2
 h5py==3.14.0

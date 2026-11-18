@@ -20,3 +20,6 @@ _bench.h5
 # Capturas de prueba personales
 angry.png
 image.png
+
+# Notas internas de desarrollo (solo locales)
+CONTEXTO.md
